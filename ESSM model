@@ -57,28 +57,26 @@ def weak_augment(images):
     return images
 
 # Define a function that very strongly augments the images
-def freq_masking(img, mask_param=5):
+def freq_masking(img, mask_param=10):
     """Apply frequency masking (masking along the height axis for images)."""
     f = tf.random.uniform([], minval=0, maxval=mask_param, dtype=tf.int32)
     f0 = tf.random.uniform([], minval=0, maxval=tf.shape(img)[0] - f, dtype=tf.int32)
     img = tf.concat([img[:f0, :, :], tf.zeros([f, tf.shape(img)[1], tf.shape(img)[2]]), img[f0 + f:, :, :]], axis=0)
     return img
 
-def time_masking(img, mask_param=5):
+def time_masking(img, mask_param=10):
     """Apply time masking (masking along the width axis for images)."""
     t = tf.random.uniform([], minval=0, maxval=mask_param, dtype=tf.int32)
     t0 = tf.random.uniform([], minval=0, maxval=tf.shape(img)[1] - t, dtype=tf.int32)
     img = tf.concat([img[:, :t0, :], tf.zeros([tf.shape(img)[0], t, tf.shape(img)[2]]), img[:, t0 + t:, :]], axis=1)
     return img
 
-def time_warp(img, warp_param=5):
+def time_warp(img, warp_param=10):
     """Apply time warping (shifting along the width axis for images)."""
     warp_dist = tf.random.uniform([], minval=-warp_param, maxval=warp_param, dtype=tf.int32)
     img_warped = tf.roll(img, shift=warp_dist, axis=1)  # Shift along width axis
     return img_warped
 
-
-    return cutout_image
 def strong_augment(images):
     images = tf.map_fn(lambda img: freq_masking(img), images)
     images = tf.map_fn(lambda img: time_masking(img), images)
@@ -99,7 +97,8 @@ x_train_lab = x_train
 y_train_lab = y_train
 x_train_unlab = x_unlab
 
-tau = 0.95
+initial_threshold = 0.95
+final_threshold = 0.5
 mu = 4  # size of unlab batch
 lambda_u = 1  # loss weight
 epochs = 500
@@ -206,6 +205,9 @@ indices_unlab = np.arange(x_unlab.shape[0])
 # Training loop
 for epoch in range(epochs):
 
+    # Decrease threshold `tau` over epochs
+    tau = initial_threshold - (initial_threshold - final_threshold) * (epoch / epochs)  # Linearly decay from 0.95 to 0.5
+
     # Shuffle the lab data
     np.random.shuffle(indices_lab)
     # Shuffle the unlab data
@@ -216,7 +218,7 @@ for epoch in range(epochs):
     cumul_loss_value_lab = 0
     cumul_loss_value_unlab = 0
 
-    # Intialize the number of pseudo labels
+    # Initialize the number of pseudo labels
     num_pseudo_labels = 0
 
     # Training loop
@@ -322,6 +324,7 @@ for epoch in range(epochs):
         'Epoch: {}, Loss: {}, Loss lab: {}, Loss unlab: {}, Train Accuracy: {}, Test Accuracy: {}, Pseudo Labels: {}'.format(
             epoch, cumul_loss_value, cumul_loss_value_lab, cumul_loss_value_unlab, avg_train_acc, avg_test_acc,
             num_pseudo_labels))
+
 
  # After training is complete, create a dictionary to hold the values
 results_dict = {
