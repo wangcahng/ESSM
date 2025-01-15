@@ -176,26 +176,8 @@ for train_index, test_index in kf.split(features):
         model = Model(inputs, x)
         return model
 
-    # Define the model with 3 ResNet layers
-    def create_model(image_size=IMAGE_SIZE):
-        model = Sequential()
-        model.add(Conv2D(32, (3, 3), activation='relu', input_shape=(image_size, image_size, 1), padding='same'))
-        model.add(MaxPooling2D((2, 2)))
-        model.add(Dropout(0.5))
-        model.add(Conv2D(32, (3, 3), activation='relu', padding='same'))
-        model.add(MaxPooling2D((2, 2)))
-        model.add(Dropout(0.5))
-        model.add(Conv2D(32, (3, 3), activation='relu', padding='same'))
-        model.add(MaxPooling2D((2, 2)))
-        model.add(Flatten())
-        model.add(Dropout(0.5))
-        model.add(Dense(128, activation='relu'))
-        model.add(Dense(NUM_CLASSES, activation='softmax'))
-        return model
-
-    create_model().summary()
-
-    model = create_model(image_size=IMAGE_SIZE)
+    # Create the model
+    model = create_resnet_model((IMAGE_SIZE, IMAGE_SIZE, 1), NUM_CLASSES)
 
     # Training settings
     optimizer = optimizers.Adam(learning_rate=lr)
