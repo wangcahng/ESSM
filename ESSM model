@@ -7,14 +7,15 @@ from tensorflow.keras.layers import Conv2D, MaxPooling2D, Dense, Flatten, Dropou
 from tensorflow.keras import Model
 import matplotlib.pyplot as plt
 import math
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import KFold
 
 # Load the custom dataset
-data_path = 'D:\Pythonproject\半监督声泄漏.csv'
+data_path = 'D:\Pythonproject\semi-supervised_acoustic_leak.csv'
 data = pd.read_csv(data_path)
 # Assume that the labels are in the last column and the features are in the rest
 features = np.array(data.iloc[:, :-1]).astype(np.float32)
 labels = np.array(data.iloc[:, -1]).astype(np.float32)
-from sklearn.preprocessing import StandardScaler
 
 scaler = StandardScaler()
 
@@ -24,436 +25,439 @@ features_scaled = scaler.fit_transform(features)
 features = features_scaled.reshape(17602, 65, 65, 1)  # Update shape accordingly
 labels = labels.reshape(-1, 1)
 
-# Split into train and test sets
-from sklearn.model_selection import train_test_split
+# Initialize KFold (5-fold cross-validation)
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
 
-x_train, x_test, y_train, y_test = train_test_split(features, labels, test_size=0.1, random_state=13)
+# Loop through each fold
+for train_index, test_index in kf.split(features):
+    x_train, x_test = features[train_index], features[test_index]
+    y_train, y_test = labels[train_index], labels[test_index]
 
-# Create an unlabeled dataset of the training set randomly
-unlabel_ratio = 0.80
-indices = np.arange(x_train.shape[0])
-np.random.shuffle(indices)
-x_unlab = x_train[indices[0:int(unlabel_ratio * x_train.shape[0])]]
-x_train = x_train[indices[int(unlabel_ratio * x_train.shape[0]):]]
-y_unlab = y_train[indices[0:int(unlabel_ratio * y_train.shape[0])]]
-y_train = y_train[indices[int(unlabel_ratio * y_train.shape[0]):]]
+    # Create an unlabeled dataset of the training set randomly
+    unlabel_ratio = 0.80
+    indices = np.arange(x_train.shape[0])
+    np.random.shuffle(indices)
+    x_unlab = x_train[indices[0:int(unlabel_ratio * x_train.shape[0])]]
+    x_train = x_train[indices[int(unlabel_ratio * x_train.shape[0]):]]
+    y_unlab = y_train[indices[0:int(unlabel_ratio * y_train.shape[0])]]
+    y_train = y_train[indices[int(unlabel_ratio * y_train.shape[0]):]]
 
-IMAGE_SIZE = 65
-NUM_CLASSES = len(np.unique(y_train))  # Update based on your dataset
+    IMAGE_SIZE = 65
+    NUM_CLASSES = len(np.unique(y_train))  # Update based on your dataset
 
-print('x_train shape:', x_train.shape)
-print('y_train shape:', y_train.shape)
-print('x_unlab shape:', x_unlab.shape)
-print('y_unlab shape:', y_unlab.shape)
-print('x_test shape:', x_test.shape)
-print('y_test shape:', y_test.shape)
-
-
-# Define a function that weakly augments the images
-def weak_augment(images):
-    images = tf.image.random_flip_left_right(images)
-    images = tf.image.random_brightness(images, max_delta=0.2)
-    images = tf.image.random_contrast(images, lower=0.2, upper=1.0)
-    return images
-
-# Define a function that very strongly augments the images
-def freq_masking(img, mask_param=10):
-    """Apply frequency masking (masking along the height axis for images)."""
-    f = tf.random.uniform([], minval=0, maxval=mask_param, dtype=tf.int32)
-    f0 = tf.random.uniform([], minval=0, maxval=tf.shape(img)[0] - f, dtype=tf.int32)
-    img = tf.concat([img[:f0, :, :], tf.zeros([f, tf.shape(img)[1], tf.shape(img)[2]]), img[f0 + f:, :, :]], axis=0)
-    return img
-
-def time_masking(img, mask_param=10):
-    """Apply time masking (masking along the width axis for images)."""
-    t = tf.random.uniform([], minval=0, maxval=mask_param, dtype=tf.int32)
-    t0 = tf.random.uniform([], minval=0, maxval=tf.shape(img)[1] - t, dtype=tf.int32)
-    img = tf.concat([img[:, :t0, :], tf.zeros([tf.shape(img)[0], t, tf.shape(img)[2]]), img[:, t0 + t:, :]], axis=1)
-    return img
-
-def time_warp(img, warp_param=10):
-    """Apply time warping (shifting along the width axis for images)."""
-    warp_dist = tf.random.uniform([], minval=-warp_param, maxval=warp_param, dtype=tf.int32)
-    img_warped = tf.roll(img, shift=warp_dist, axis=1)  # Shift along width axis
-    return img_warped
-
-def strong_augment(images):
-    images = tf.map_fn(lambda img: freq_masking(img), images)
-    images = tf.map_fn(lambda img: time_masking(img), images)
-    images = tf.map_fn(lambda img: time_warp(img), images)
-    return images
-
-# Define a function that creates pseudo labels above a threshold of confidence and assign -1 to the others
-def create_pseudo_labels(model, images, threshold):
-    predictions = model(images, training=False)
-    max_indexes = tf.math.argmax(predictions, axis=1)
-    confidence = tf.reduce_max(predictions, axis=1)
-    pseudo_labels = tf.where(confidence > threshold, max_indexes, -1)
-    return pseudo_labels
+    print('x_train shape:', x_train.shape)
+    print('y_train shape:', y_train.shape)
+    print('x_unlab shape:', x_unlab.shape)
+    print('y_unlab shape:', y_unlab.shape)
+    print('x_test shape:', x_test.shape)
+    print('y_test shape:', y_test.shape)
 
 
-# Data
-x_train_lab = x_train
-y_train_lab = y_train
-x_train_unlab = x_unlab
+    # Define a function that weakly augments the images
+    def weak_augment(images):
+        images = tf.image.random_flip_left_right(images)
+        images = tf.image.random_brightness(images, max_delta=0.2)
+        images = tf.image.random_contrast(images, lower=0.2, upper=1.0)
+        return images
 
-initial_threshold = 0.95
-final_threshold = 0.5
-mu = 4  # size of unlab batch
-lambda_u = 1  # loss weight
-epochs = 500
+    # Define a function that very strongly augments the images
+    def freq_masking(img, mask_param=10):
+        """Apply frequency masking (masking along the height axis for images)."""
+        f = tf.random.uniform([], minval=0, maxval=mask_param, dtype=tf.int32)
+        f0 = tf.random.uniform([], minval=0, maxval=tf.shape(img)[0] - f, dtype=tf.int32)
+        img = tf.concat([img[:f0, :, :], tf.zeros([f, tf.shape(img)[1], tf.shape(img)[2]]), img[f0 + f:, :, :]], axis=0)
+        return img
 
-lr = 1e-3
-bs_lab = 64  # lab batch size
-bs_unlab = mu * bs_lab  # unlab batch size
-bs_total = bs_lab + bs_unlab  # total batch size
-steps_per_epoch = math.floor(x_train.shape[0] / bs_lab)
-prev_acc = 0
+    def time_masking(img, mask_param=10):
+        """Apply time masking (masking along the width axis for images)."""
+        t = tf.random.uniform([], minval=0, maxval=mask_param, dtype=tf.int32)
+        t0 = tf.random.uniform([], minval=0, maxval=tf.shape(img)[1] - t, dtype=tf.int32)
+        img = tf.concat([img[:, :t0, :], tf.zeros([tf.shape(img)[0], t, tf.shape(img)[2]]), img[:, t0 + t:, :]], axis=1)
+        return img
 
-# Logs
-train_acc = []
-test_acc = []
-losses = []
-losses_lab = []
-losses_unlab = []
-pseudo_lab = []
+    def time_warp(img, warp_param=10):
+        """Apply time warping (shifting along the width axis for images)."""
+        warp_dist = tf.random.uniform([], minval=-warp_param, maxval=warp_param, dtype=tf.int32)
+        img_warped = tf.roll(img, shift=warp_dist, axis=1)  # Shift along width axis
+        return img_warped
 
-# Residual Block
-def res_block(x, filters, kernel_size=3, stride=1):
-    shortcut = x
+    def strong_augment(images):
+        images = tf.map_fn(lambda img: freq_masking(img), images)
+        images = tf.map_fn(lambda img: time_masking(img), images)
+        images = tf.map_fn(lambda img: time_warp(img), images)
+        return images
 
-    # First convolutional layer
-    x = Conv2D(filters, kernel_size, padding='same', strides=stride, kernel_regularizer=regularizers.l2(0.001))(x)
-    x = BatchNormalization()(x)
-    x = ReLU()(x)
-
-    # Second convolutional layer
-    x = Conv2D(filters, kernel_size, padding='same', kernel_regularizer=regularizers.l2(0.001))(x)
-    x = BatchNormalization()(x)
-
-    # Adjust the shortcut connection to match the output shape if needed
-    if stride != 1 or shortcut.shape[-1] != filters:
-        shortcut = Conv2D(filters, (1, 1), padding='same', strides=stride, kernel_regularizer=regularizers.l2(0.001))(
-            shortcut)
-        shortcut = BatchNormalization()(shortcut)
-
-    x = Add()([x, shortcut])
-    x = ReLU()(x)
-
-    return x
+    # Define a function that creates pseudo labels above a threshold of confidence and assign -1 to the others
+    def create_pseudo_labels(model, images, threshold):
+        predictions = model(images, training=False)
+        max_indexes = tf.math.argmax(predictions, axis=1)
+        confidence = tf.reduce_max(predictions, axis=1)
+        pseudo_labels = tf.where(confidence > threshold, max_indexes, -1)
+        return pseudo_labels
 
 
-def create_resnet_model(input_shape, num_classes):
-    inputs = Input(shape=input_shape)
+    # Data
+    x_train_lab = x_train
+    y_train_lab = y_train
+    x_train_unlab = x_unlab
 
-    # Initial Conv layer
-    x = Conv2D(16, (3, 3), padding='same', kernel_regularizer=regularizers.l2(0.001))(inputs)
-    x = BatchNormalization()(x)
-    x = ReLU()(x)
-    x = Dropout(0.5)(x)
+    initial_threshold = 0.95
+    final_threshold = 0.5
+    mu = 4  # size of unlab batch
+    lambda_u = 1  # loss weight
+    epochs = 500
 
-    # First ResNet block
-    x = res_block(x, 16, stride=2)
-    x = Dropout(0.5)(x)
+    lr = 1e-3
+    bs_lab = 64  # lab batch size
+    bs_unlab = mu * bs_lab  # unlab batch size
+    bs_total = bs_lab + bs_unlab  # total batch size
+    steps_per_epoch = math.floor(x_train.shape[0] / bs_lab)
+    prev_acc = 0
 
-    # Second ResNet block
-    x = res_block(x, 32, stride=2)
-    x = Dropout(0.5)(x)
+    # Logs
+    train_acc = []
+    test_acc = []
+    losses = []
+    losses_lab = []
+    losses_unlab = []
+    pseudo_lab = []
 
-    # Third ResNet block
-    x = res_block(x, 64, stride=2)
-    x = Dropout(0.5)(x)
+    # Residual Block
+    def res_block(x, filters, kernel_size=3, stride=1):
+        shortcut = x
 
-    # Final layers
-    x = GlobalAveragePooling2D()(x)
-    x = Dropout(0.5)(x)
-    x = Dense(num_classes, activation='softmax')(x)
+        # First convolutional layer
+        x = Conv2D(filters, kernel_size, padding='same', strides=stride, kernel_regularizer=regularizers.l2(0.001))(x)
+        x = BatchNormalization()(x)
+        x = ReLU()(x)
 
-    model = Model(inputs, x)
-    return model
+        # Second convolutional layer
+        x = Conv2D(filters, kernel_size, padding='same', kernel_regularizer=regularizers.l2(0.001))(x)
+        x = BatchNormalization()(x)
 
-# Define the model with 3 ResNet layers
-def create_model(image_size=IMAGE_SIZE):
-    model = Sequential()
-    model.add(Conv2D(32, (3, 3), activation='relu', input_shape=(image_size, image_size, 1), padding='same'))
-    model.add(MaxPooling2D((2, 2)))
-    model.add(Dropout(0.5))
-    model.add(Conv2D(32, (3, 3), activation='relu', padding='same'))
-    model.add(MaxPooling2D((2, 2)))
-    model.add(Dropout(0.5))
-    model.add(Conv2D(32, (3, 3), activation='relu', padding='same'))
-    model.add(MaxPooling2D((2, 2)))
-    model.add(Flatten())
-    model.add(Dropout(0.5))
-    model.add(Dense(128, activation='relu'))
-    model.add(Dense(NUM_CLASSES, activation='softmax'))
-    return model
+        # Adjust the shortcut connection to match the output shape if needed
+        if stride != 1 or shortcut.shape[-1] != filters:
+            shortcut = Conv2D(filters, (1, 1), padding='same', strides=stride, kernel_regularizer=regularizers.l2(0.001))(
+                shortcut)
+            shortcut = BatchNormalization()(shortcut)
 
-create_model().summary()
+        x = Add()([x, shortcut])
+        x = ReLU()(x)
 
-model = create_model(image_size=IMAGE_SIZE)
-
-# Training settings
-optimizer = optimizers.Adam(learning_rate=lr)
-loss_fn = tf.keras.losses.SparseCategoricalCrossentropy()
-train_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy()
-test_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy()
-indices_lab = np.arange(x_train.shape[0])
-indices_unlab = np.arange(x_unlab.shape[0])
+        return x
 
 
-# Training loop
-for epoch in range(epochs):
+    def create_resnet_model(input_shape, num_classes):
+        inputs = Input(shape=input_shape)
 
-    # Decrease threshold `tau` over epochs
-    tau = initial_threshold - (initial_threshold - final_threshold) * (epoch / epochs)  # Linearly decay from 0.95 to 0.5
+        # Initial Conv layer
+        x = Conv2D(16, (3, 3), padding='same', kernel_regularizer=regularizers.l2(0.001))(inputs)
+        x = BatchNormalization()(x)
+        x = ReLU()(x)
+        x = Dropout(0.5)(x)
 
-    # Shuffle the lab data
-    np.random.shuffle(indices_lab)
-    # Shuffle the unlab data
-    np.random.shuffle(indices_unlab)
+        # First ResNet block
+        x = res_block(x, 16, stride=2)
+        x = Dropout(0.5)(x)
 
-    # Initialize cumulative losses
-    cumul_loss_value = 0
-    cumul_loss_value_lab = 0
-    cumul_loss_value_unlab = 0
+        # Second ResNet block
+        x = res_block(x, 32, stride=2)
+        x = Dropout(0.5)(x)
 
-    # Initialize the number of pseudo labels
-    num_pseudo_labels = 0
+        # Third ResNet block
+        x = res_block(x, 64, stride=2)
+        x = Dropout(0.5)(x)
+
+        # Final layers
+        x = GlobalAveragePooling2D()(x)
+        x = Dropout(0.5)(x)
+        x = Dense(num_classes, activation='softmax')(x)
+
+        model = Model(inputs, x)
+        return model
+
+    # Define the model with 3 ResNet layers
+    def create_model(image_size=IMAGE_SIZE):
+        model = Sequential()
+        model.add(Conv2D(32, (3, 3), activation='relu', input_shape=(image_size, image_size, 1), padding='same'))
+        model.add(MaxPooling2D((2, 2)))
+        model.add(Dropout(0.5))
+        model.add(Conv2D(32, (3, 3), activation='relu', padding='same'))
+        model.add(MaxPooling2D((2, 2)))
+        model.add(Dropout(0.5))
+        model.add(Conv2D(32, (3, 3), activation='relu', padding='same'))
+        model.add(MaxPooling2D((2, 2)))
+        model.add(Flatten())
+        model.add(Dropout(0.5))
+        model.add(Dense(128, activation='relu'))
+        model.add(Dense(NUM_CLASSES, activation='softmax'))
+        return model
+
+    create_model().summary()
+
+    model = create_model(image_size=IMAGE_SIZE)
+
+    # Training settings
+    optimizer = optimizers.Adam(learning_rate=lr)
+    loss_fn = tf.keras.losses.SparseCategoricalCrossentropy()
+    train_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy()
+    test_acc_metric = tf.keras.metrics.SparseCategoricalAccuracy()
+    indices_lab = np.arange(x_train.shape[0])
+    indices_unlab = np.arange(x_unlab.shape[0])
+
 
     # Training loop
-    for step in range(steps_per_epoch):
+    for epoch in range(epochs):
 
-        # Get the lab batch
-        batch_indices_lab = indices_lab[step * bs_lab:(step + 1) * bs_lab]
-        if len(batch_indices_lab) < bs_lab:
-            continue  # Skip the last incomplete batch
-        x_batch_lab = x_train_lab[batch_indices_lab]
-        y_batch_lab = y_train_lab[batch_indices_lab]
+        # Decrease threshold `tau` over epochs
+        tau = initial_threshold + (initial_threshold - final_threshold) * (- epoch * math.log(initial_threshold / final_threshold) / epochs)  # Decay from 0.95 to 0.5
 
-        # Get the unlab batch
-        batch_indices_unlab = indices_unlab[step * bs_unlab:(step + 1) * bs_unlab]
-        if len(batch_indices_unlab) < bs_unlab:
-            continue  # Skip the last incomplete batch
-        x_batch_unlab = x_train_unlab[batch_indices_unlab]
+        # Shuffle the lab data
+        np.random.shuffle(indices_lab)
+        # Shuffle the unlab data
+        np.random.shuffle(indices_unlab)
 
-        with tf.GradientTape() as tape:
+        # Initialize cumulative losses
+        cumul_loss_value = 0
+        cumul_loss_value_lab = 0
+        cumul_loss_value_unlab = 0
 
-            # Get predictions for the lab batch
-            y_pred_lab = model(weak_augment(x_batch_lab), training=True)
+        # Initialize the number of pseudo labels
+        num_pseudo_labels = 0
 
-            # Compute the lab loss
-            loss_value_lab = loss_fn(y_batch_lab, y_pred_lab)
+        # Training loop
+        for step in range(steps_per_epoch):
 
-            # Get predictions for the unlab batch (weakly augmented)
-            x_batch_unlab_wa = weak_augment(x_batch_unlab)
+            # Get the lab batch
+            batch_indices_lab = indices_lab[step * bs_lab:(step + 1) * bs_lab]
+            if len(batch_indices_lab) < bs_lab:
+                continue  # Skip the last incomplete batch
+            x_batch_lab = x_train_lab[batch_indices_lab]
+            y_batch_lab = y_train_lab[batch_indices_lab]
 
-            # Get predictions for the unlab batch (strongly augmented)
-            x_batch_unlab_sa = strong_augment(x_batch_unlab)
-            y_pred_sa = model(x_batch_unlab_sa, training=True)
+            # Get the unlab batch
+            batch_indices_unlab = indices_unlab[step * bs_unlab:(step + 1) * bs_unlab]
+            if len(batch_indices_unlab) < bs_unlab:
+                continue  # Skip the last incomplete batch
+            x_batch_unlab = x_train_unlab[batch_indices_unlab]
 
-            # Compute the loss for valid pseudo labels
-            pseudo_labels = create_pseudo_labels(model, x_batch_unlab_wa, tau)
-            filtered_pseudo_labels = tf.boolean_mask(pseudo_labels, pseudo_labels != -1)
-            filtered_y_pred_sa = tf.boolean_mask(y_pred_sa, pseudo_labels != -1)
-            filtered_x_unlab = tf.boolean_mask(x_batch_unlab, pseudo_labels != -1)
+            with tf.GradientTape() as tape:
 
-            # Compute the loss for the unlab batch if there are valid pseudo labels
-            if filtered_pseudo_labels.shape[0] > 0:
-                loss_value_unlab = loss_fn(filtered_pseudo_labels, filtered_y_pred_sa)
-                num_pseudo_labels += filtered_pseudo_labels.shape[0]
-            else:
-                loss_value_unlab = tf.constant(0.0, dtype=tf.float32)
+                # Get predictions for the lab batch
+                y_pred_lab = model(weak_augment(x_batch_lab), training=True)
 
-            # Compute the total loss
-            loss_value = loss_value_lab + lambda_u * loss_value_unlab
+                # Compute the lab loss
+                loss_value_lab = loss_fn(y_batch_lab, y_pred_lab)
 
-        # Compute the gradients
-        grads = tape.gradient(loss_value, model.trainable_weights)
+                # Get predictions for the unlab batch (weakly augmented)
+                x_batch_unlab_wa = weak_augment(x_batch_unlab)
 
-        # Update the weights
-        optimizer.apply_gradients(zip(grads, model.trainable_weights))
+                # Get predictions for the unlab batch (strongly augmented)
+                x_batch_unlab_sa = strong_augment(x_batch_unlab)
+                y_pred_sa = model(x_batch_unlab_sa, training=True)
 
-        # Update the cumulative loss
-        cumul_loss_value += loss_value
-        cumul_loss_value_lab += loss_value_lab
-        cumul_loss_value_unlab += loss_value_unlab
+                # Compute the loss for valid pseudo labels
+                pseudo_labels = create_pseudo_labels(model, x_batch_unlab_wa, tau)
+                filtered_pseudo_labels = tf.boolean_mask(pseudo_labels, pseudo_labels != -1)
+                filtered_y_pred_sa = tf.boolean_mask(y_pred_sa, pseudo_labels != -1)
+                filtered_x_unlab = tf.boolean_mask(x_batch_unlab, pseudo_labels != -1)
 
-        # Update the training accuracy
-        train_acc_metric.update_state(np.expand_dims(y_batch_lab, 1), y_pred_lab)
+                # Compute the loss for the unlab batch if there are valid pseudo labels
+                if filtered_pseudo_labels.shape[0] > 0:
+                    loss_value_unlab = loss_fn(filtered_pseudo_labels, filtered_y_pred_sa)
+                    num_pseudo_labels += filtered_pseudo_labels.shape[0]
+                else:
+                    loss_value_unlab = tf.constant(0.0, dtype=tf.float32)
 
-    cumul_loss_value = cumul_loss_value / steps_per_epoch
-    cumul_loss_value_lab = cumul_loss_value_lab / steps_per_epoch
-    cumul_loss_value_unlab = cumul_loss_value_unlab / steps_per_epoch
+                # Compute the total loss
+                loss_value = loss_value_lab + lambda_u * loss_value_unlab
 
-    # Calculate the average pseudo labels
-    num_pseudo_labels = int(num_pseudo_labels / steps_per_epoch)
+            # Compute the gradients
+            grads = tape.gradient(loss_value, model.trainable_weights)
 
-    # Calculate the average training accuracy
-    avg_train_acc = train_acc_metric.result().numpy()
+            # Update the weights
+            optimizer.apply_gradients(zip(grads, model.trainable_weights))
 
-    # Reset the training metrics
-    train_acc_metric.reset_states()
+            # Update the cumulative loss
+            cumul_loss_value += loss_value
+            cumul_loss_value_lab += loss_value_lab
+            cumul_loss_value_unlab += loss_value_unlab
 
-    # Calculate the test accuracy
+            # Update the training accuracy
+            train_acc_metric.update_state(np.expand_dims(y_batch_lab, 1), y_pred_lab)
+
+        cumul_loss_value = cumul_loss_value / steps_per_epoch
+        cumul_loss_value_lab = cumul_loss_value_lab / steps_per_epoch
+        cumul_loss_value_unlab = cumul_loss_value_unlab / steps_per_epoch
+
+        # Calculate the average pseudo labels
+        num_pseudo_labels = int(num_pseudo_labels / steps_per_epoch)
+
+        # Calculate the average training accuracy
+        avg_train_acc = train_acc_metric.result().numpy()
+
+        # Reset the training metrics
+        train_acc_metric.reset_states()
+
+        # Calculate the test accuracy
+        # Evaluate the model on the test data without using 'evaluate'
+        test_acc_metric.update_state(np.expand_dims(y_test, 1), model(x_test, training=False))
+
+        # Calculate the average test accuracy
+        avg_test_acc = test_acc_metric.result().numpy()
+
+        # if the test accuracy is better than the previous one, save the model
+        if avg_test_acc > prev_acc:
+            model.save_weights('ESSM_0.80.h5')
+            prev_acc = avg_test_acc
+            print('Model saved')
+
+        # Reset the test metrics
+        test_acc_metric.reset_states()
+
+        # Save the results
+        losses.append(cumul_loss_value.numpy())
+        losses_lab.append(cumul_loss_value_lab.numpy())
+        losses_unlab.append(cumul_loss_value_unlab.numpy())
+        train_acc.append(avg_train_acc)
+        test_acc.append(avg_test_acc)
+        pseudo_lab.append(num_pseudo_labels)
+
+        # Print the results
+        print(
+            'Epoch: {}, Loss: {}, Loss lab: {}, Loss unlab: {}, Train Accuracy: {}, Test Accuracy: {}, Pseudo Labels: {}'.format(
+                epoch, cumul_loss_value, cumul_loss_value_lab, cumul_loss_value_unlab, avg_train_acc, avg_test_acc,
+                num_pseudo_labels))
+
+
+     # After training is complete, create a dictionary to hold the values
+    results_dict = {
+        'train_acc': train_acc,
+        'test_acc': test_acc,
+        'losses': losses,
+        'losses_lab': losses_lab,
+        'losses_unlab': losses_unlab,
+        'pseudo_lab': pseudo_lab
+    }
+
+    # Convert the dictionary to a DataFrame
+    results_df = pd.DataFrame(results_dict)
+
+    # Save the DataFrame to a CSV file
+    results_df.to_csv('training_results_ESSM_0.70_4.csv')
+
+    print('Training statistics have been saved to training_results.csv')
+
+    # Load the best model
+    model.load_weights('ESSM_0.80.h5')
+
     # Evaluate the model on the test data without using 'evaluate'
     test_acc_metric.update_state(np.expand_dims(y_test, 1), model(x_test, training=False))
 
     # Calculate the average test accuracy
     avg_test_acc = test_acc_metric.result().numpy()
 
-    # if the test accuracy is better than the previous one, save the model
-    if avg_test_acc > prev_acc:
-        model.save_weights('ESSM_0.80.h5')
-        prev_acc = avg_test_acc
-        print('Model saved')
-
-    # Reset the test metrics
-    test_acc_metric.reset_states()
-
-    # Save the results
-    losses.append(cumul_loss_value.numpy())
-    losses_lab.append(cumul_loss_value_lab.numpy())
-    losses_unlab.append(cumul_loss_value_unlab.numpy())
-    train_acc.append(avg_train_acc)
-    test_acc.append(avg_test_acc)
-    pseudo_lab.append(num_pseudo_labels)
-
     # Print the results
-    print(
-        'Epoch: {}, Loss: {}, Loss lab: {}, Loss unlab: {}, Train Accuracy: {}, Test Accuracy: {}, Pseudo Labels: {}'.format(
-            epoch, cumul_loss_value, cumul_loss_value_lab, cumul_loss_value_unlab, avg_train_acc, avg_test_acc,
-            num_pseudo_labels))
+    print('Test Accuracy: {}'.format(avg_test_acc))
+
+    # Plot the results (losses, accuracies, pseudo labels)
+    plt.figure(figsize=(15, 5))
+    plt.subplot(1, 3, 1)
+    plt.plot(losses, label='Total')
+    plt.plot(losses_lab, label='Lab')
+    plt.plot(losses_unlab, label='Unlab')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.subplot(1, 3, 2)
+    plt.plot(train_acc, label='Train')
+    plt.plot(test_acc, label='Test')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.subplot(1, 3, 3)
+    plt.plot(pseudo_lab)
+    plt.xlabel('Epoch')
+    plt.ylabel('Pseudo Labels')
+    plt.savefig("ESSM_0.70_4_ACC.png")
+    plt.show()
+
+    from sklearn.metrics import roc_curve, roc_auc_score, auc, accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
+    # Evaluate the model on the test data
+    y_pred_prob = model.predict(x_test)
+    y_pred = np.argmax(y_pred_prob, axis=1)
+
+    # Compute metrics
+    conf_matrix = confusion_matrix(y_test, y_pred)
+    class_report = classification_report(y_test, y_pred, target_names=[str(i) for i in range(NUM_CLASSES)])
+    roc_auc = roc_auc_score(tf.keras.utils.to_categorical(y_test, num_classes=2), y_pred_prob, multi_class='ovr')
+
+    # Print metrics
+    print('Confusion Matrix:\n', conf_matrix)
+    print('Classification Report:\n', class_report)
+    print('ROC AUC Score:', roc_auc)
+
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred, average='macro')
+    recall = recall_score(y_test, y_pred, average='macro')
+    f1 = f1_score(y_test, y_pred, average='macro')
+
+    print("Accuracy:", accuracy)
+    print("Precision:", precision)
+    print("Recall:", recall)
+    print("F1 Score:", f1)
 
 
- # After training is complete, create a dictionary to hold the values
-results_dict = {
-    'train_acc': train_acc,
-    'test_acc': test_acc,
-    'losses': losses,
-    'losses_lab': losses_lab,
-    'losses_unlab': losses_unlab,
-    'pseudo_lab': pseudo_lab
-}
+    def sensitivity_specificity(cm):
+      # Count true positives, false positives, true negatives, and false negatives for each category
+      tp = np.diag(cm)
+      fp = np.sum(cm, axis=0) - tp
+      fn = np.sum(cm, axis=1) - tp
+      tn = np.sum(cm) - (tp + fp + fn)
 
-# Convert the dictionary to a DataFrame
-results_df = pd.DataFrame(results_dict)
-
-# Save the DataFrame to a CSV file
-results_df.to_csv('training_results_ESSM_0.70_4.csv')
-
-print('Training statistics have been saved to training_results.csv')
-
-# Load the best model
-model.load_weights('ESSM_0.80.h5')
-
-# Evaluate the model on the test data without using 'evaluate'
-test_acc_metric.update_state(np.expand_dims(y_test, 1), model(x_test, training=False))
-
-# Calculate the average test accuracy
-avg_test_acc = test_acc_metric.result().numpy()
-
-# Print the results
-print('Test Accuracy: {}'.format(avg_test_acc))
-
-# Plot the results (losses, accuracies, pseudo labels)
-plt.figure(figsize=(15, 5))
-plt.subplot(1, 3, 1)
-plt.plot(losses, label='Total')
-plt.plot(losses_lab, label='Lab')
-plt.plot(losses_unlab, label='Unlab')
-plt.xlabel('Epoch')
-plt.ylabel('Loss')
-plt.legend()
-plt.subplot(1, 3, 2)
-plt.plot(train_acc, label='Train')
-plt.plot(test_acc, label='Test')
-plt.xlabel('Epoch')
-plt.ylabel('Accuracy')
-plt.legend()
-plt.subplot(1, 3, 3)
-plt.plot(pseudo_lab)
-plt.xlabel('Epoch')
-plt.ylabel('Pseudo Labels')
-plt.savefig("ESSM_0.70_4_ACC.png")
-plt.show()
-
-from sklearn.metrics import roc_curve, roc_auc_score, auc, accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, classification_report
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-# Evaluate the model on the test data
-y_pred_prob = model.predict(x_test)
-y_pred = np.argmax(y_pred_prob, axis=1)
-
-# Compute metrics
-conf_matrix = confusion_matrix(y_test, y_pred)
-class_report = classification_report(y_test, y_pred, target_names=[str(i) for i in range(NUM_CLASSES)])
-roc_auc = roc_auc_score(tf.keras.utils.to_categorical(y_test, num_classes=2), y_pred_prob, multi_class='ovr')
-
-# Print metrics
-print('Confusion Matrix:\n', conf_matrix)
-print('Classification Report:\n', class_report)
-print('ROC AUC Score:', roc_auc)
-
-accuracy = accuracy_score(y_test, y_pred)
-precision = precision_score(y_test, y_pred, average='macro')
-recall = recall_score(y_test, y_pred, average='macro')
-f1 = f1_score(y_test, y_pred, average='macro')
-
-print("Accuracy:", accuracy)
-print("Precision:", precision)
-print("Recall:", recall)
-print("F1 Score:", f1)
+      # Calculate sensitivity and specificity
+      sensitivity = tp / (tp + fn)
+      specificity = tn / (tn + fp)
+      return sensitivity, specificity
 
 
-def sensitivity_specificity(cm):
-  # Count true positives, false positives, true negatives, and false negatives for each category
-  tp = np.diag(cm)
-  fp = np.sum(cm, axis=0) - tp
-  fn = np.sum(cm, axis=1) - tp
-  tn = np.sum(cm) - (tp + fp + fn)
+    sensitivity, specificity = sensitivity_specificity(conf_matrix)
 
-  # Calculate sensitivity and specificity
-  sensitivity = tp / (tp + fn)
-  specificity = tn / (tn + fp)
-  return sensitivity, specificity
+    # Output result
+    print("Sensitivity (Recall) for each class:", sensitivity)
+    print("Specificity for each class:", specificity)
+    print(sensitivity.mean())
+    print(specificity.mean())
 
+    # Plot AUC curve for each class
+    fpr = {}
+    tpr = {}
+    roc_auc_dict = {}
 
-sensitivity, specificity = sensitivity_specificity(conf_matrix)
+    for i in range(NUM_CLASSES):
+      fpr[i], tpr[i], _ = roc_curve(y_test, y_pred_prob[:, i], pos_label=i)
+      roc_auc_dict[i] = auc(fpr[i], tpr[i])
 
-# Output result
-print("Sensitivity (Recall) for each class:", sensitivity)
-print("Specificity for each class:", specificity)
-print(sensitivity.mean())
-print(specificity.mean())
+    plt.figure()
+    for i in range(NUM_CLASSES):
+      plt.plot(fpr[i], tpr[i], label='Class {} (area = {:.2f})'.format(i, roc_auc_dict[i]))
 
-# Plot AUC curve for each class
-fpr = {}
-tpr = {}
-roc_auc_dict = {}
+    plt.plot([0, 1], [0, 1], 'k--')
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title('Receiver Operating Characteristic (ROC) Curve')
+    plt.legend(loc='lower right')
+    plt.show()
 
-for i in range(NUM_CLASSES):
-  fpr[i], tpr[i], _ = roc_curve(y_test, y_pred_prob[:, i], pos_label=i)
-  roc_auc_dict[i] = auc(fpr[i], tpr[i])
-
-plt.figure()
-for i in range(NUM_CLASSES):
-  plt.plot(fpr[i], tpr[i], label='Class {} (area = {:.2f})'.format(i, roc_auc_dict[i]))
-
-plt.plot([0, 1], [0, 1], 'k--')
-plt.xlim([0.0, 1.0])
-plt.ylim([0.0, 1.05])
-plt.xlabel('False Positive Rate')
-plt.ylabel('True Positive Rate')
-plt.title('Receiver Operating Characteristic (ROC) Curve')
-plt.legend(loc='lower right')
-plt.show()
-
-# Plot confusion matrix
-plt.figure(figsize=(10, 7))
-sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=[str(i) for i in range(NUM_CLASSES)], yticklabels=[str(i) for i in range(NUM_CLASSES)])
-plt.xlabel('Predicted')
-plt.ylabel('True')
-plt.title('Confusion Matrix')
-plt.show()
+    # Plot confusion matrix
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=[str(i) for i in range(NUM_CLASSES)], yticklabels=[str(i) for i in range(NUM_CLASSES)])
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+    plt.show()
